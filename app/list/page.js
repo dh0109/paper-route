@@ -127,7 +127,7 @@ export default function ListPage() {
     // 위치 미허용 시에는 최소값 15분만 부여 — 원거리 차단(25분 컷)을
     // 위치 거부로 우회하는 악용의 이득을 제거하되, 가까운 곳의 실사용은 보장.
     const t = travelMin(l);
-    const minutes = t == null ? 15 : Math.min(40, Math.max(15, t + 10));
+    const minutes = t == null ? 15 : Math.min(45, Math.max(15, t + 10));
     const untilMs = Date.now() + minutes * 60000;
     const nowIso = new Date().toISOString();
     // 경쟁 조건 방지: '아직 선점 가능일 때만' 변경하라는 조건을 DB가 판정.
