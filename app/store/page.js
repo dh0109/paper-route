@@ -236,7 +236,6 @@ export default function StorePage() {
           {photo && !result && (
             <div
               style={{
-                width: "100%",
                 marginTop: 14,
                 padding: "16px",
                 borderRadius: 10,
