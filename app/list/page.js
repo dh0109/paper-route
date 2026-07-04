@@ -119,15 +119,35 @@ export default function ListPage() {
   const isMine = (l) => myClaim && myClaim.id === l.id && myClaim.until > tick;
   const hasActiveClaim = myClaim && myClaim.until > tick;
 
+  const [notice, setNotice] = useState(null); // 상단 안내 (선점 경합 등)
+  const [confirmingId, setConfirmingId] = useState(null); // 도착 확인 진행 중인 항목
+
   const claim = async (l) => {
-    // 선점 시간 = 예상 이동 시간 + 여유 10분 (15~40분 사이), 위치 모르면 30분
+    // 선점 시간 = 예상 이동시간 + 여유 10분 (15~40분).
+    // 위치 미허용 시에는 최소값 15분만 부여 — 원거리 차단(25분 컷)을
+    // 위치 거부로 우회하는 악용의 이득을 제거하되, 가까운 곳의 실사용은 보장.
     const t = travelMin(l);
-    const minutes = t == null ? 30 : Math.min(40, Math.max(15, t + 10));
+    const minutes = t == null ? 15 : Math.min(40, Math.max(15, t + 10));
     const untilMs = Date.now() + minutes * 60000;
-    await supabase
+    const nowIso = new Date().toISOString();
+    // 경쟁 조건 방지: '아직 선점 가능일 때만' 변경하라는 조건을 DB가 판정.
+    // (available이거나, claimed지만 시간이 만료된 경우에만 성공)
+    const { data, error } = await supabase
       .from("listings")
-      .update({ status: "claimed", claimed_until: new Date(untilMs).toISOString() })
-      .eq("id", l.id);
+      .update({
+        status: "claimed",
+        claimed_until: new Date(untilMs).toISOString(),
+      })
+      .eq("id", l.id)
+      .or(`status.eq.available,and(status.eq.claimed,claimed_until.lt.${nowIso})`)
+      .select();
+    if (error || !data || data.length === 0) {
+      // 다른 분이 밀리초 차이로 먼저 선점한 경우
+      setNotice("방금 다른 분이 먼저 선점하셨어요. 다른 곳을 확인해 보세요.");
+      setTimeout(() => setNotice(null), 5000);
+      load();
+      return;
+    }
     const mine = { id: l.id, until: untilMs };
     setMyClaim(mine);
     try {
@@ -138,6 +158,7 @@ export default function ListPage() {
 
   const taken = async (id) => {
     await supabase.from("listings").update({ status: "taken" }).eq("id", id);
+    setConfirmingId(null);
     if (myClaim && myClaim.id === id) {
       setMyClaim(null);
       try {
@@ -233,6 +254,23 @@ export default function ListPage() {
                     : "가까운 곳부터 보여드려요 · 시간은 리어카 기준이에요"
                   : "위치를 허용하시면 걸리는 시간을 알려드려요"}
               </p>
+
+              {notice && (
+                <div
+                  style={{
+                    padding: "12px 14px",
+                    marginBottom: 14,
+                    borderRadius: 10,
+                    background: T.orangeBg,
+                    color: T.orange,
+                    fontSize: 16,
+                    fontWeight: 700,
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {notice}
+                </div>
+              )}
 
               {sorted.length === 0 && (
                 <div
@@ -369,23 +407,81 @@ export default function ListPage() {
                       </button>
 
                       {mine ? (
-                        <button
-                          onClick={() => taken(l.id)}
-                          style={{
-                            width: "100%",
-                            marginTop: 14,
-                            height: 68,
-                            borderRadius: 12,
-                            border: "none",
-                            background: T.green,
-                            color: "#fff",
-                            fontSize: 24,
-                            fontWeight: 800,
-                            cursor: "pointer",
-                          }}
-                        >
-                          가져왔어요 (완료)
-                        </button>
+                        confirmingId === l.id ? (
+                          <div
+                            style={{
+                              marginTop: 14,
+                              padding: "14px",
+                              borderRadius: 12,
+                              background: T.orangeBg,
+                              textAlign: "center",
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontSize: 16,
+                                fontWeight: 700,
+                                color: T.orange,
+                                lineHeight: 1.5,
+                                marginBottom: 10,
+                              }}
+                            >
+                              현장에 붙은 QR을 찍어 도착을 확인합니다
+                              <br />
+                              <span style={{ fontSize: 13, fontWeight: 600 }}>
+                                (데모에서는 아래 버튼으로 대신합니다)
+                              </span>
+                            </div>
+                            <button
+                              onClick={() => taken(l.id)}
+                              style={{
+                                width: "100%",
+                                height: 60,
+                                borderRadius: 12,
+                                border: "none",
+                                background: T.green,
+                                color: "#fff",
+                                fontSize: 20,
+                                fontWeight: 800,
+                                cursor: "pointer",
+                              }}
+                            >
+                              도착 확인 · 수거 완료
+                            </button>
+                            <button
+                              onClick={() => setConfirmingId(null)}
+                              style={{
+                                marginTop: 8,
+                                background: "none",
+                                border: "none",
+                                color: T.gray,
+                                fontSize: 14,
+                                textDecoration: "underline",
+                                cursor: "pointer",
+                              }}
+                            >
+                              아직 도착 전이에요
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmingId(l.id)}
+                            style={{
+                              width: "100%",
+                              marginTop: 14,
+                              height: 68,
+                              borderRadius: 12,
+                              border: "none",
+                              background: T.green,
+                              color: "#fff",
+                              fontSize: 24,
+                              fontWeight: 800,
+                              cursor: "pointer",
+                            }}
+                          >
+                            가져왔어요 (완료)
+                          </button>
+                        )
                       ) : claimed ? (
                         <div
                           style={{

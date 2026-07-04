@@ -47,13 +47,15 @@ export default function StorePage() {
     try {
       const dataUrl = await resizeImage(file);
       setPhoto(dataUrl);
+      analyze(dataUrl); // 사진이 올라오면 분석 자동 시작 (점주 터치 수 절감)
     } catch {
       setError("사진을 불러오지 못했어요. 다른 사진으로 시도해 주세요.");
     }
   };
 
-  const analyze = async () => {
-    if (!photo) return;
+  const analyze = async (photoData) => {
+    const target = photoData || photo;
+    if (!target) return;
     setAnalyzing(true);
     setError(null);
     try {
@@ -61,7 +63,7 @@ export default function StorePage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          image: photo.split(",")[1],
+          image: target.split(",")[1],
           mediaType: "image/jpeg",
         }),
       });
@@ -81,6 +83,7 @@ export default function StorePage() {
 
   const publish = async () => {
     if (!result || !store) return;
+    if (result.kg <= 0) return; // 폐지가 없으면 등록 불가
     setPublishing(true);
     setError(null);
     const { error: dbError } = await supabase.from("listings").insert({
@@ -231,23 +234,43 @@ export default function StorePage() {
           )}
 
           {photo && !result && (
-            <button
-              onClick={analyze}
-              disabled={analyzing}
+            <div
               style={{
                 width: "100%",
                 marginTop: 14,
-                height: 52,
+                padding: "16px",
                 borderRadius: 10,
-                border: "none",
-                background: analyzing ? T.gray : T.ink,
-                color: "#fff",
-                fontSize: 16,
+                background: T.field,
+                color: T.kraftDeep,
+                fontSize: 15,
                 fontWeight: 700,
-                cursor: analyzing ? "default" : "pointer",
+                textAlign: "center",
               }}
             >
-              {analyzing ? "AI가 사진을 분석하는 중…" : "AI로 폐지 양 분석하기"}
+              {analyzing
+                ? "AI가 사진을 분석하는 중…"
+                : error
+                ? "분석에 실패했어요"
+                : "분석을 준비하는 중…"}
+            </div>
+          )}
+          {photo && !result && !analyzing && error && (
+            <button
+              onClick={() => analyze()}
+              style={{
+                width: "100%",
+                marginTop: 8,
+                height: 46,
+                borderRadius: 10,
+                border: "none",
+                background: T.ink,
+                color: "#fff",
+                fontSize: 15,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              다시 분석하기
             </button>
           )}
 
@@ -310,7 +333,23 @@ export default function StorePage() {
                   {PRICE_SOURCE}
                 </div>
               </div>
-              {!published ? (
+              {result.kg <= 0 ? (
+                <div
+                  style={{
+                    padding: "16px",
+                    background: T.grayBg,
+                    color: T.gray,
+                    fontSize: 15,
+                    fontWeight: 700,
+                    textAlign: "center",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  사진에서 폐지가 확인되지 않아 등록할 수 없어요.
+                  <br />
+                  폐지가 나오게 다시 찍어 주세요.
+                </div>
+              ) : !published ? (
                 <button
                   onClick={publish}
                   disabled={publishing}
