@@ -3,15 +3,53 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { supabase, isConfigured } from "../../lib/supabase";
-import { T, PRICE_PER_KG, fmt } from "../../lib/theme";
-
-const CLAIM_MINUTES = 30;
+import {
+  T,
+  PRICE_PER_KG,
+  fmt,
+  DEMO_STORES,
+  cartMinutes,
+  CART_SPEED_KMH,
+  MAX_CLAIM_MINUTES,
+} from "../../lib/theme";
 
 export default function ListPage() {
   const [listings, setListings] = useState([]);
   const [loading, setLoading] = useState(true);
   const [dbError, setDbError] = useState(false);
   const [tick, setTick] = useState(Date.now());
+  const [userPos, setUserPos] = useState(null); // {lat, lng} | "denied" | null(대기중)
+  const [myClaim, setMyClaim] = useState(null); // {id, until}
+  const [routeMeters, setRouteMeters] = useState({}); // 가게명 → 실경로 거리(m)
+
+  // 위치 확보 시 각 배출지까지 실경로 거리 조회 (실패 시 해당 가게는 직선 폴백)
+  useEffect(() => {
+    if (!userPos || userPos === "denied") return;
+    let cancelled = false;
+    (async () => {
+      for (const s of DEMO_STORES) {
+        try {
+          const res = await fetch("/api/route", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sx: userPos.lng,
+              sy: userPos.lat,
+              ex: s.lng,
+              ey: s.lat,
+            }),
+          });
+          const data = await res.json();
+          if (!cancelled && data.meters) {
+            setRouteMeters((prev) => ({ ...prev, [s.name]: data.meters }));
+          }
+        } catch {}
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [userPos]);
 
   const load = async () => {
     const { data, error } = await supabase
@@ -30,15 +68,44 @@ export default function ListPage() {
     setLoading(false);
   };
 
-  // 최초 로드 + 8초 폴링 (점주 등록이 곧바로 반영되도록)
+  // 최초 로드 + 8초 폴링
   useEffect(() => {
     load();
+    // 이 기기에서 진행 중인 선점 복원
+    try {
+      const saved = JSON.parse(localStorage.getItem("myClaim") || "null");
+      if (saved && saved.until > Date.now()) setMyClaim(saved);
+      else localStorage.removeItem("myClaim");
+    } catch {}
+    // 위치 권한 (거부해도 서비스는 동네 목록으로 계속 작동)
+    if (typeof navigator !== "undefined" && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (p) => setUserPos({ lat: p.coords.latitude, lng: p.coords.longitude }),
+        () => setUserPos("denied"),
+        { enableHighAccuracy: false, timeout: 8000 }
+      );
+    } else {
+      setUserPos("denied");
+    }
     const t = setInterval(() => {
       load();
       setTick(Date.now());
     }, 8000);
     return () => clearInterval(t);
   }, []);
+
+  const storeCoord = (l) => DEMO_STORES.find((s) => s.name === l.store);
+
+  // 리어카 기준 예상 이동 시간(분)
+  // 1순위: 실경로 거리(티맵 보행자 경로) ÷ 리어카 속도
+  // 2순위(폴백): 직선거리 × 우회계수 ÷ 리어카 속도
+  const travelMin = (l) => {
+    const s = storeCoord(l);
+    if (!userPos || userPos === "denied" || !s) return null;
+    const m = routeMeters[l.store];
+    if (m) return Math.max(1, Math.round((m / 1000 / CART_SPEED_KMH) * 60));
+    return cartMinutes(userPos.lat, userPos.lng, s.lat, s.lng);
+  };
 
   const isClaimed = (l) =>
     l.status === "claimed" &&
@@ -48,21 +115,62 @@ export default function ListPage() {
   const minutesLeft = (l) =>
     Math.max(0, Math.ceil((new Date(l.claimed_until).getTime() - tick) / 60000));
 
-  const claim = async (id) => {
-    const until = new Date(Date.now() + CLAIM_MINUTES * 60000).toISOString();
+  const isMine = (l) => myClaim && myClaim.id === l.id && myClaim.until > tick;
+  const hasActiveClaim = myClaim && myClaim.until > tick;
+
+  const claim = async (l) => {
+    // 선점 시간 = 예상 이동 시간 + 여유 10분 (15~40분 사이), 위치 모르면 30분
+    const t = travelMin(l);
+    const minutes = t == null ? 30 : Math.min(40, Math.max(15, t + 10));
+    const untilMs = Date.now() + minutes * 60000;
     await supabase
       .from("listings")
-      .update({ status: "claimed", claimed_until: until })
-      .eq("id", id);
+      .update({ status: "claimed", claimed_until: new Date(untilMs).toISOString() })
+      .eq("id", l.id);
+    const mine = { id: l.id, until: untilMs };
+    setMyClaim(mine);
+    try {
+      localStorage.setItem("myClaim", JSON.stringify(mine));
+    } catch {}
     load();
   };
 
   const taken = async (id) => {
     await supabase.from("listings").update({ status: "taken" }).eq("id", id);
+    if (myClaim && myClaim.id === id) {
+      setMyClaim(null);
+      try {
+        localStorage.removeItem("myClaim");
+      } catch {}
+    }
     load();
   };
 
+  const openDirections = (l) => {
+    const s = storeCoord(l);
+    if (!s) return;
+    // 카카오맵 앱: 도보 경로 (앱이 없으면 아래 웹 지도로 폴백)
+    const appUrl = `kakaomap://route?ep=${s.lat},${s.lng}&by=FOOT`;
+    const webUrl = `https://map.kakao.com/link/to/${encodeURIComponent(
+      l.store
+    )},${s.lat},${s.lng}`;
+    const start = Date.now();
+    window.location.href = appUrl;
+    setTimeout(() => {
+      // 앱 전환이 일어나지 않았으면 웹 지도 열기
+      if (Date.now() - start < 1600) window.open(webUrl, "_blank");
+    }, 1200);
+  };
+
   const availableCount = listings.filter((l) => !isClaimed(l)).length;
+
+  // 가까운 순 정렬 (위치 있을 때만), 없으면 최신순 유지
+  const sorted = [...listings].sort((a, b) => {
+    const ta = travelMin(a);
+    const tb = travelMin(b);
+    if (ta == null || tb == null) return 0;
+    return ta - tb;
+  });
 
   return (
     <main
@@ -109,7 +217,7 @@ export default function ListPage() {
                 style={{
                   fontSize: 20,
                   fontWeight: 700,
-                  margin: "0 0 16px",
+                  margin: "0 0 6px",
                   lineHeight: 1.4,
                 }}
               >
@@ -117,8 +225,15 @@ export default function ListPage() {
                 <span style={{ color: T.green }}>폐지 {availableCount}곳</span>
                 이 있어요
               </p>
+              <p style={{ fontSize: 14, color: T.gray, margin: "0 0 16px" }}>
+                {userPos && userPos !== "denied"
+                  ? Object.keys(routeMeters).length > 0
+                    ? "가까운 곳부터 · 실제 길 기준, 리어카 속도로 계산한 시간이에요"
+                    : "가까운 곳부터 보여드려요 · 시간은 리어카 기준이에요"
+                  : "위치를 허용하시면 걸리는 시간을 알려드려요"}
+              </p>
 
-              {listings.length === 0 && (
+              {sorted.length === 0 && (
                 <div
                   style={{
                     padding: "40px 20px",
@@ -136,13 +251,18 @@ export default function ListPage() {
                 </div>
               )}
 
-              {listings.map((l) => {
-                const claimed = isClaimed(l);
+              {sorted.map((l) => {
+                const mine = isMine(l);
+                const claimed = isClaimed(l) && !mine;
+                const t = travelMin(l);
+                const tooFar = t != null && t > MAX_CLAIM_MINUTES;
                 return (
                   <div
                     key={l.id}
                     style={{
-                      border: `2px solid ${claimed ? T.line : T.green}`,
+                      border: `2px solid ${
+                        mine ? T.orange : claimed ? T.line : T.green
+                      }`,
                       borderRadius: 14,
                       marginBottom: 16,
                       overflow: "hidden",
@@ -152,14 +272,20 @@ export default function ListPage() {
                   >
                     <div
                       style={{
-                        background: claimed ? T.grayBg : T.greenBg,
-                        color: claimed ? T.gray : T.green,
+                        background: mine
+                          ? T.orangeBg
+                          : claimed
+                          ? T.grayBg
+                          : T.greenBg,
+                        color: mine ? T.orange : claimed ? T.gray : T.green,
                         fontSize: 22,
                         fontWeight: 800,
                         padding: "10px 16px",
                       }}
                     >
-                      {claimed
+                      {mine
+                        ? `내가 가는 중 · ${minutesLeft(l)}분 남음`
+                        : claimed
                         ? `다른 분이 가는 중 · ${minutesLeft(l)}분 남음`
                         : "있음"}
                     </div>
@@ -180,6 +306,20 @@ export default function ListPage() {
                           flexWrap: "wrap",
                         }}
                       >
+                        {t != null && (
+                          <div
+                            style={{
+                              background: T.ink,
+                              color: "#fff",
+                              borderRadius: 10,
+                              padding: "10px 14px",
+                              fontSize: 22,
+                              fontWeight: 800,
+                            }}
+                          >
+                            리어카 약 {t}분
+                          </div>
+                        )}
                         <div
                           style={{
                             background: T.field,
@@ -209,9 +349,96 @@ export default function ListPage() {
                         {l.note ? ` · ${l.note}` : ""}
                       </div>
 
-                      {!claimed ? (
+                      <button
+                        onClick={() => openDirections(l)}
+                        style={{
+                          width: "100%",
+                          marginTop: 12,
+                          height: 56,
+                          borderRadius: 12,
+                          border: `2px solid ${T.ink}`,
+                          background: "#fff",
+                          color: T.ink,
+                          fontSize: 20,
+                          fontWeight: 800,
+                          cursor: "pointer",
+                        }}
+                      >
+                        🧭 길 찾기 (지도 열기)
+                      </button>
+
+                      {mine ? (
                         <button
-                          onClick={() => claim(l.id)}
+                          onClick={() => taken(l.id)}
+                          style={{
+                            width: "100%",
+                            marginTop: 14,
+                            height: 68,
+                            borderRadius: 12,
+                            border: "none",
+                            background: T.green,
+                            color: "#fff",
+                            fontSize: 24,
+                            fontWeight: 800,
+                            cursor: "pointer",
+                          }}
+                        >
+                          가져왔어요 (완료)
+                        </button>
+                      ) : claimed ? (
+                        <div
+                          style={{
+                            marginTop: 14,
+                            padding: "14px",
+                            borderRadius: 12,
+                            background: T.grayBg,
+                            color: T.gray,
+                            fontSize: 18,
+                            fontWeight: 700,
+                            textAlign: "center",
+                          }}
+                        >
+                          시간이 지나면 다시 열려요
+                        </div>
+                      ) : tooFar ? (
+                        <div
+                          style={{
+                            marginTop: 14,
+                            padding: "14px",
+                            borderRadius: 12,
+                            background: T.grayBg,
+                            color: T.gray,
+                            fontSize: 18,
+                            fontWeight: 700,
+                            textAlign: "center",
+                            lineHeight: 1.4,
+                          }}
+                        >
+                          여기서는 조금 멀어요 (약 {t}분)
+                          <br />
+                          가까운 분께 양보돼요
+                        </div>
+                      ) : hasActiveClaim ? (
+                        <div
+                          style={{
+                            marginTop: 14,
+                            padding: "14px",
+                            borderRadius: 12,
+                            background: T.orangeBg,
+                            color: T.orange,
+                            fontSize: 18,
+                            fontWeight: 700,
+                            textAlign: "center",
+                            lineHeight: 1.4,
+                          }}
+                        >
+                          지금 가시는 곳부터 다녀오세요
+                          <br />
+                          (한 번에 한 곳만 맡을 수 있어요)
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => claim(l)}
                           style={{
                             width: "100%",
                             marginTop: 14,
@@ -227,24 +454,6 @@ export default function ListPage() {
                         >
                           제가 갈게요
                         </button>
-                      ) : (
-                        <button
-                          onClick={() => taken(l.id)}
-                          style={{
-                            width: "100%",
-                            marginTop: 14,
-                            height: 56,
-                            borderRadius: 12,
-                            border: `2px solid ${T.line}`,
-                            background: "#fff",
-                            color: T.gray,
-                            fontSize: 19,
-                            fontWeight: 700,
-                            cursor: "pointer",
-                          }}
-                        >
-                          가져갔어요 (목록에서 지우기)
-                        </button>
                       )}
                     </div>
                   </div>
@@ -259,8 +468,8 @@ export default function ListPage() {
                   marginTop: 8,
                 }}
               >
-                &lsquo;제가 갈게요&rsquo;를 누르면 {CLAIM_MINUTES}분 동안 다른 분
-                화면에 &lsquo;가는 중&rsquo;으로 표시돼요. 서로 헛걸음하지
+                &lsquo;제가 갈게요&rsquo;를 누르면 가시는 데 걸리는 시간만큼 다른
+                분 화면에 &lsquo;가는 중&rsquo;으로 표시돼요. 서로 헛걸음하지
                 않도록요.
               </p>
             </>
