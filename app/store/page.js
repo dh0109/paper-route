@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { supabase, isConfigured } from "../../lib/supabase";
-import { T, PRICE_PER_KG, fmt, DEMO_STORES } from "../../lib/theme";
+import { T, PRICE_PER_KG, PRICE_SOURCE, fmt, DEMO_STORES } from "../../lib/theme";
 
 // 사진을 캔버스로 축소해 용량을 줄입니다 (긴 변 900px, JPEG)
 function resizeImage(file) {
@@ -306,6 +306,9 @@ export default function StorePage() {
                     {result.note}
                   </div>
                 )}
+                <div style={{ fontSize: 11.5, color: T.gray, marginTop: 8 }}>
+                  {PRICE_SOURCE}
+                </div>
               </div>
               {!published ? (
                 <button

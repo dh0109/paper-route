@@ -6,6 +6,7 @@ import { supabase, isConfigured } from "../../lib/supabase";
 import {
   T,
   PRICE_PER_KG,
+  PRICE_SOURCE,
   fmt,
   DEMO_STORES,
   cartMinutes,
@@ -471,6 +472,9 @@ export default function ListPage() {
                 &lsquo;제가 갈게요&rsquo;를 누르면 가시는 데 걸리는 시간만큼 다른
                 분 화면에 &lsquo;가는 중&rsquo;으로 표시돼요. 서로 헛걸음하지
                 않도록요.
+              </p>
+              <p style={{ fontSize: 12, color: T.gray, marginTop: 4 }}>
+                {PRICE_SOURCE}
               </p>
             </>
           )}
